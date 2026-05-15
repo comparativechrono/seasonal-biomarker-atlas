@@ -1,0 +1,36 @@
+{
+  "title": "Seasonal Vitamin D Atlas",
+  "subtitle": "Global Serum 25-Hydroxyvitamin D Levels",
+  "biomarker_name": "25(OH)D",
+  "unit": "nmol/L",
+  "description": "Population mean serum 25-hydroxyvitamin D concentrations from national surveys and published studies. Values are standardised to nmol/L. Seasonal interpolation uses a sinusoidal model between measured summer (Jun–Aug) and winter (Dec–Feb) values.",
+  "about": "Built for chronobiology research. Data compiled from three exhaustive literature searches covering national health surveys (NHANES, NDNS, CHMS, DEGS1, KiGGS, KNHANES, ENSANUT, NHES, TILDA, StatusD, Tromsø), the VDSP-standardised European pooled dataset (Cashman et al. 2016), and regional cohort studies across 39 countries. Southern Hemisphere entries have inverted phase. Some Gulf-state data shows paradoxical winter > summer values due to summer sun-avoidance behaviour.",
+  "color_scale": {
+    "min": 15,
+    "max": 100,
+    "thresholds": [
+      { "value": 30, "label": "Deficient", "color": "#d63031" },
+      { "value": 50, "label": "Insufficient", "color": "#e17055" },
+      { "value": 75, "label": "Adequate", "color": "#fdcb6e" },
+      { "value": 999, "label": "Optimal", "color": "#00b894" }
+    ]
+  },
+  "datasets": [
+    { "file": "data/healthy_adults.csv", "label": "Healthy Adults" },
+    { "file": "data/paediatrics.csv", "label": "Paediatrics" },
+    { "file": "data/elderly.csv", "label": "Elderly (65+)" }
+  ],
+  "csv_columns": {
+    "country": "country",
+    "region": "region",
+    "latitude": "lat",
+    "longitude": "lng",
+    "jun_aug_value": "jun_aug_value",
+    "dec_feb_value": "dec_feb_value",
+    "sample_size": "n",
+    "short_citation": "short_citation",
+    "full_citation": "full_citation",
+    "url": "url"
+  },
+  "interpolation_peak_month": 8
+}
