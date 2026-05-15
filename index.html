@@ -41,7 +41,8 @@ h1{font-family:var(--font-title);font-size:clamp(20px,4vw,28px);font-weight:700;
 .legend-labels{display:flex;gap:clamp(8px,2vw,16px);font-size:9px;
   font-family:var(--font-mono);color:var(--text-dim);margin-top:2px;justify-content:center}
 .sun-indicator{display:flex;align-items:center;gap:6px;justify-content:center;
-  font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin:4px 0}
+  font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin:4px 0;
+  transition:opacity 0.4s}
 .sun-dot{width:8px;height:8px;border-radius:50%;background:#f0c040;
   box-shadow:0 0 6px rgba(240,192,64,0.5)}
 #controls{width:100%;max-width:400px;margin:10px 0}
@@ -98,7 +99,7 @@ footer{text-align:center;font-size:10px;color:#1e2e42;font-family:var(--font-mon
   </div>
   <div id="legend"><span id="legend-lo"></span><div id="legend-bar"></div><span id="legend-hi"></span></div>
   <div class="legend-labels" id="legend-labels"></div>
-  <div class="sun-indicator"><span class="sun-dot"></span><span id="sun-text">Solar declination: 23.4° N</span></div>
+  <div class="sun-indicator" id="sun-indicator"><span class="sun-dot"></span><span id="sun-text"></span></div>
   <div id="controls">
     <div class="slider-ticks"><span>Jan</span><span>Apr</span><span>Jul</span><span>Oct</span><span>Dec</span></div>
     <input type="range" id="month-slider" min="1" max="12" step="0.1" value="7">
@@ -110,266 +111,415 @@ footer{text-align:center;font-size:10px;color:#1e2e42;font-family:var(--font-mon
   <footer id="footer"></footer>
 </div>
 <script>
-const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
-const EARTH_TILT=23.44;
-const AUTO_SPEED=0.06;
-const RESUME_DELAY=3500;
+const MONTHS=['January','February','March','April','May','June',
+  'July','August','September','October','November','December'];
+const EARTH_TILT = 23.44;
+const AUTO_SPEED = 0.06;       // degrees per normalised frame
+const RESUME_DELAY = 3500;     // ms before returning home
+const HOME_ANIM_DURATION = 800; // ms to animate back to home position
 
-let config,worldTopo,land,borders,datasets={},currentKey=null;
-let rotation=[20,-15,-EARTH_TILT];
-let selectedIdx=null,currentMonth=7;
-let canvasW,canvasH,globeR,projection,path,ctx;
-let pointHitAreas=[],dragState=null;
-let autoRotating=true,autoTimer=null,lastTime=0;
+let config, worldTopo, land, borders, datasets = {}, currentKey = null;
 
-function solarDeclination(m){return EARTH_TILT*Math.sin(2*Math.PI*(m-3)/12)}
-function subSolarPoint(m){return[0,solarDeclination(m)]}
+// Home position: slightly tilted, centred on Europe/Africa
+const HOME_ROT = [20, -15, -EARTH_TILT];
+let rotation = [...HOME_ROT];
+let selectedIdx = null, currentMonth = 7;
+let canvasW, canvasH, globeR, projection, path, ctx;
+let pointHitAreas = [], dragState = null;
 
-async function init(){
-  try{config=await fetch('data/config.json').then(r=>r.json())}
-  catch(e){document.getElementById('globe-loading').textContent='Error loading config';return}
-  document.title=config.title;
-  document.getElementById('app-title').textContent=config.title;
-  updateSubtitle();buildLegend();buildButtons();
-  const[topo]=await Promise.all([
-    fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json()),
-    loadDataset(0)]);
-  worldTopo=topo;
-  land=topojson.feature(topo,topo.objects.countries);
-  borders=topojson.mesh(topo,topo.objects.countries,(a,b)=>a!==b);
-  document.getElementById('globe-loading').style.display='none';
-  setupCanvas();setupInteraction();updateSun();startLoop();
-  document.getElementById('footer').innerHTML=
-    `<span id="pc"></span><br>${config.about?config.about.slice(0,200)+'…':''}`;
+// State machine: 'auto' | 'interacting' | 'returning'
+let mode = 'auto';
+let autoTimer = null;
+let lastTime = 0;
+
+// Return animation state
+let returnStart = null;
+let returnFrom = null;
+let returnTarget = null;
+
+// Illumination fades in/out
+let illumOpacity = 1.0; // 0 = hidden, 1 = fully visible
+
+// ── Solar geometry ────────────────────────────────────────────────
+function solarDeclination(m) {
+  return EARTH_TILT * Math.sin(2 * Math.PI * (m - 3) / 12);
+}
+
+// Sub-solar point: longitude = viewer-facing (tracks rotation),
+// latitude = declination. This keeps the sun fixed in screen space.
+function subSolarPoint() {
+  return [-rotation[0], solarDeclination(currentMonth)];
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+async function init() {
+  try { config = await fetch('data/config.json').then(r => r.json()); }
+  catch(e) { document.getElementById('globe-loading').textContent = 'Error loading config'; return; }
+  document.title = config.title;
+  document.getElementById('app-title').textContent = config.title;
+  updateSubtitle(); buildLegend(); buildButtons();
+  const [topo] = await Promise.all([
+    fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r => r.json()),
+    loadDataset(0)
+  ]);
+  worldTopo = topo;
+  land = topojson.feature(topo, topo.objects.countries);
+  borders = topojson.mesh(topo, topo.objects.countries, (a, b) => a !== b);
+  document.getElementById('globe-loading').style.display = 'none';
+  setupCanvas(); setupInteraction(); updateSun(); startLoop();
+  document.getElementById('footer').innerHTML =
+    `<span id="pc"></span><br>${config.about ? config.about.slice(0, 200) + '…' : ''}`;
   updPC();
 }
 
-async function loadDataset(i){
-  const ds=config.datasets[i],key=ds.label;
-  if(datasets[key]){currentKey=key;return}
-  const cols=config.csv_columns;
-  const text=await fetch(ds.file).then(r=>r.text());
-  const parsed=Papa.parse(text.trim(),{header:true,skipEmptyLines:true});
-  datasets[key]=parsed.data.map(row=>({
-    country:row[cols.country],region:row[cols.region],
-    lat:+row[cols.latitude],lng:+row[cols.longitude],
-    junAug:+row[cols.jun_aug_value],decFeb:+row[cols.dec_feb_value],
-    n:row[cols.sample_size]?+row[cols.sample_size]:null,
-    shortCite:row[cols.short_citation]||'',fullCite:row[cols.full_citation]||'',
-    url:row[cols.url]||''
-  })).filter(d=>!isNaN(d.lat)&&!isNaN(d.lng)&&!isNaN(d.junAug));
-  currentKey=key;
+// ── Data ──────────────────────────────────────────────────────────
+async function loadDataset(i) {
+  const ds = config.datasets[i], key = ds.label;
+  if (datasets[key]) { currentKey = key; return; }
+  const cols = config.csv_columns;
+  const text = await fetch(ds.file).then(r => r.text());
+  const parsed = Papa.parse(text.trim(), { header: true, skipEmptyLines: true });
+  datasets[key] = parsed.data.map(row => ({
+    country: row[cols.country], region: row[cols.region],
+    lat: +row[cols.latitude], lng: +row[cols.longitude],
+    junAug: +row[cols.jun_aug_value], decFeb: +row[cols.dec_feb_value],
+    n: row[cols.sample_size] ? +row[cols.sample_size] : null,
+    shortCite: row[cols.short_citation] || '', fullCite: row[cols.full_citation] || '',
+    url: row[cols.url] || ''
+  })).filter(d => !isNaN(d.lat) && !isNaN(d.lng) && !isNaN(d.junAug));
+  currentKey = key;
 }
-function getData(){return datasets[currentKey]||[]}
-function interpolate(jA,dF,m){
-  const pk=config.interpolation_peak_month||8;
-  return(jA+dF)/2+(jA-dF)/2*Math.cos(2*Math.PI*(m-pk)/12);
+function getData() { return datasets[currentKey] || []; }
+function interpolate(jA, dF, m) {
+  const pk = config.interpolation_peak_month || 8;
+  return (jA + dF) / 2 + (jA - dF) / 2 * Math.cos(2 * Math.PI * (m - pk) / 12);
 }
-function valColor(v){const sc=config.color_scale,t=Math.max(0,Math.min(1,(v-sc.min)/(sc.max-sc.min)));
-  return`hsl(${t*130},${75+t*10}%,${42+t*12}%)`}
-function valGlow(v){const sc=config.color_scale,t=Math.max(0,Math.min(1,(v-sc.min)/(sc.max-sc.min)));
-  return`hsla(${t*130},85%,55%,0.35)`}
-function statusLabel(v){for(const t of config.color_scale.thresholds)if(v<t.value)return t.label;
-  return config.color_scale.thresholds.at(-1).label}
+function valColor(v) { const sc = config.color_scale, t = Math.max(0, Math.min(1, (v - sc.min) / (sc.max - sc.min)));
+  return `hsl(${t*130},${75+t*10}%,${42+t*12}%)`; }
+function valGlow(v) { const sc = config.color_scale, t = Math.max(0, Math.min(1, (v - sc.min) / (sc.max - sc.min)));
+  return `hsla(${t*130},85%,55%,0.35)`; }
+function statusLabel(v) { for (const t of config.color_scale.thresholds) if (v < t.value) return t.label;
+  return config.color_scale.thresholds.at(-1).label; }
 
-function buildLegend(){
-  const sc=config.color_scale;
-  document.getElementById('legend-bar').style.background=
-    `linear-gradient(90deg,${sc.thresholds.map((t,i)=>t.color+' '+(i/(sc.thresholds.length-1)*100)+'%').join(',')})`;
-  document.getElementById('legend-lo').textContent=`<${sc.thresholds[0].value}`;
-  document.getElementById('legend-hi').textContent=`${sc.max}+`;
-  document.getElementById('legend-labels').innerHTML=
-    sc.thresholds.map(t=>`<span style="color:${t.color}">${t.label}</span>`).join('');
+// ── UI ────────────────────────────────────────────────────────────
+function buildLegend() {
+  const sc = config.color_scale;
+  document.getElementById('legend-bar').style.background =
+    `linear-gradient(90deg,${sc.thresholds.map((t, i) => t.color + ' ' + (i / (sc.thresholds.length - 1) * 100) + '%').join(',')})`;
+  document.getElementById('legend-lo').textContent = `<${sc.thresholds[0].value}`;
+  document.getElementById('legend-hi').textContent = `${sc.max}+`;
+  document.getElementById('legend-labels').innerHTML =
+    sc.thresholds.map(t => `<span style="color:${t.color}">${t.label}</span>`).join('');
 }
-function buildButtons(){
-  const w=document.getElementById('dataset-toggles');
-  config.datasets.forEach((ds,i)=>{
-    const b=document.createElement('button');b.className='ds-btn'+(i===0?' active':'');
-    b.textContent=ds.label;
-    b.onclick=async()=>{w.querySelectorAll('.ds-btn').forEach(x=>x.classList.remove('active'));
-      b.classList.add('active');await loadDataset(i);selectedIdx=null;closeInfo();updPC()};
+function buildButtons() {
+  const w = document.getElementById('dataset-toggles');
+  config.datasets.forEach((ds, i) => {
+    const b = document.createElement('button'); b.className = 'ds-btn' + (i === 0 ? ' active' : '');
+    b.textContent = ds.label;
+    b.onclick = async () => {
+      w.querySelectorAll('.ds-btn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active'); await loadDataset(i); selectedIdx = null; closeInfo(); updPC();
+    };
     w.appendChild(b);
   });
 }
-function updPC(){const e=document.getElementById('pc');if(e)e.textContent=`${getData().length} locations · ${currentKey}`}
-function updateSubtitle(){
-  const mi=Math.max(0,Math.min(11,Math.round(currentMonth)-1));
-  document.getElementById('app-subtitle').textContent=
-    `${config.biomarker_name} · ${currentKey||''} · ${MONTHS[mi]}`;
+function updPC() { const e = document.getElementById('pc'); if (e) e.textContent = `${getData().length} locations · ${currentKey}`; }
+function updateSubtitle() {
+  const mi = Math.max(0, Math.min(11, Math.round(currentMonth) - 1));
+  document.getElementById('app-subtitle').textContent =
+    `${config.biomarker_name} · ${currentKey || ''} · ${MONTHS[mi]}`;
 }
-function updateSun(){
-  const d=solarDeclination(currentMonth),dir=d>=0?'N':'S';
-  document.getElementById('sun-text').textContent=
+function updateSun() {
+  const d = solarDeclination(currentMonth), dir = d >= 0 ? 'N' : 'S';
+  document.getElementById('sun-text').textContent =
     `Solar declination: ${Math.abs(d).toFixed(1)}° ${dir}`;
+  document.getElementById('sun-indicator').style.opacity = illumOpacity > 0.01 ? 1 : 0.3;
 }
 
-function setupCanvas(){
-  const canvas=document.getElementById('globe'),wr=document.getElementById('globe-wrap');
-  const sz=Math.floor(wr.getBoundingClientRect().width);
-  canvasW=canvasH=sz;globeR=sz/2-10;
-  const dpr=window.devicePixelRatio||1;
-  canvas.width=sz*dpr;canvas.height=sz*dpr;
-  canvas.style.width=sz+'px';canvas.style.height=sz+'px';
-  ctx=canvas.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);
-  projection=d3.geoOrthographic().scale(globeR).translate([canvasW/2,canvasH/2])
+// ── Canvas ────────────────────────────────────────────────────────
+function setupCanvas() {
+  const canvas = document.getElementById('globe'), wr = document.getElementById('globe-wrap');
+  const sz = Math.floor(wr.getBoundingClientRect().width);
+  canvasW = canvasH = sz; globeR = sz / 2 - 10;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = sz * dpr; canvas.height = sz * dpr;
+  canvas.style.width = sz + 'px'; canvas.style.height = sz + 'px';
+  ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  projection = d3.geoOrthographic().scale(globeR).translate([canvasW / 2, canvasH / 2])
     .rotate(rotation).clipAngle(90);
-  path=d3.geoPath(projection,ctx);
+  path = d3.geoPath(projection, ctx);
 }
 
-function render(){
-  if(!ctx||!land)return;
-  const cx=canvasW/2,cy=canvasH/2;
+// ── Render ────────────────────────────────────────────────────────
+function render() {
+  if (!ctx || !land) return;
+  const cx = canvasW / 2, cy = canvasH / 2;
   projection.rotate(rotation);
-  ctx.clearRect(0,0,canvasW,canvasH);
+  ctx.clearRect(0, 0, canvasW, canvasH);
 
   // Atmosphere
-  const atm=ctx.createRadialGradient(cx,cy,globeR*.96,cx,cy,globeR*1.14);
-  atm.addColorStop(0,'rgba(50,130,210,0.07)');atm.addColorStop(.6,'rgba(30,90,170,0.03)');
-  atm.addColorStop(1,'rgba(0,0,0,0)');
-  ctx.fillStyle=atm;ctx.beginPath();ctx.arc(cx,cy,globeR*1.14,0,Math.PI*2);ctx.fill();
+  const atm = ctx.createRadialGradient(cx, cy, globeR * .96, cx, cy, globeR * 1.14);
+  atm.addColorStop(0, 'rgba(50,130,210,0.07)'); atm.addColorStop(.6, 'rgba(30,90,170,0.03)');
+  atm.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = atm; ctx.beginPath(); ctx.arc(cx, cy, globeR * 1.14, 0, Math.PI * 2); ctx.fill();
 
-  // Ocean base
-  const oc=ctx.createRadialGradient(cx-globeR*.2,cy-globeR*.2,globeR*.05,cx,cy,globeR);
-  oc.addColorStop(0,'#112d50');oc.addColorStop(.6,'#0b1e38');oc.addColorStop(1,'#071428');
-  ctx.beginPath();ctx.arc(cx,cy,globeR,0,Math.PI*2);ctx.fillStyle=oc;ctx.fill();
+  // Ocean
+  const oc = ctx.createRadialGradient(cx - globeR * .2, cy - globeR * .2, globeR * .05, cx, cy, globeR);
+  oc.addColorStop(0, '#112d50'); oc.addColorStop(.6, '#0b1e38'); oc.addColorStop(1, '#071428');
+  ctx.beginPath(); ctx.arc(cx, cy, globeR, 0, Math.PI * 2); ctx.fillStyle = oc; ctx.fill();
 
   // Graticule
-  ctx.beginPath();path(d3.geoGraticule10());
-  ctx.strokeStyle='rgba(55,100,155,0.10)';ctx.lineWidth=.5;ctx.stroke();
+  ctx.beginPath(); path(d3.geoGraticule10());
+  ctx.strokeStyle = 'rgba(55,100,155,0.10)'; ctx.lineWidth = .5; ctx.stroke();
 
-  // Solar geometry
-  const sunPt=subSolarPoint(currentMonth);
-  const nightCircle=d3.geoCircle().center([sunPt[0]+180,-sunPt[1]]).radius(90)();
+  // Solar illumination — only when illumOpacity > 0
+  const sunPt = subSolarPoint();
+  const antiLng = sunPt[0] + 180;
+  const antiLat = -sunPt[1];
+  const nightCircle = d3.geoCircle().center([antiLng, antiLat]).radius(90)();
+  const showLight = illumOpacity > 0.01;
 
   ctx.save();
-  ctx.beginPath();ctx.arc(cx,cy,globeR,0,Math.PI*2);ctx.clip();
+  ctx.beginPath(); ctx.arc(cx, cy, globeR, 0, Math.PI * 2); ctx.clip();
 
   // Night on ocean
-  ctx.beginPath();path(nightCircle);ctx.fillStyle='rgba(0,5,20,0.35)';ctx.fill();
+  if (showLight) {
+    ctx.globalAlpha = illumOpacity;
+    ctx.beginPath(); path(nightCircle);
+    ctx.fillStyle = 'rgba(0,5,20,0.38)'; ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 
   // Land (daylit base)
-  ctx.beginPath();path(land);ctx.fillStyle='#1a4a3a';ctx.fill();
+  ctx.beginPath(); path(land); ctx.fillStyle = '#1a4a3a'; ctx.fill();
 
   // Night on land
-  ctx.save();
-  ctx.beginPath();path(nightCircle);ctx.clip();
-  ctx.beginPath();path(land);ctx.fillStyle='rgba(0,5,20,0.40)';ctx.fill();
-  ctx.restore();
+  if (showLight) {
+    ctx.save();
+    ctx.globalAlpha = illumOpacity;
+    ctx.beginPath(); path(nightCircle); ctx.clip();
+    ctx.beginPath(); path(land);
+    ctx.fillStyle = 'rgba(0,5,20,0.42)'; ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
 
   // Borders
-  ctx.beginPath();path(borders);ctx.strokeStyle='rgba(60,110,160,0.22)';ctx.lineWidth=.4;ctx.stroke();
+  ctx.beginPath(); path(borders);
+  ctx.strokeStyle = 'rgba(60,110,160,0.22)'; ctx.lineWidth = .4; ctx.stroke();
 
   // Terminator line
-  ctx.beginPath();path(nightCircle);
-  ctx.strokeStyle='rgba(240,200,80,0.20)';ctx.lineWidth=1.2;ctx.stroke();
-
-  // Subtle sunlight wash on day side
-  const sPt=projection(sunPt);
-  if(sPt){
-    const sg=ctx.createRadialGradient(sPt[0],sPt[1],0,sPt[0],sPt[1],globeR*.9);
-    sg.addColorStop(0,'rgba(255,240,180,0.06)');sg.addColorStop(.4,'rgba(255,220,120,0.02)');
-    sg.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=sg;ctx.beginPath();ctx.arc(cx,cy,globeR,0,Math.PI*2);ctx.fill();
+  if (showLight) {
+    ctx.globalAlpha = illumOpacity * 0.6;
+    ctx.beginPath(); path(nightCircle);
+    ctx.strokeStyle = 'rgba(240,200,80,0.30)'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.globalAlpha = 1;
   }
-  ctx.restore();
+
+  // Subtle sunlight wash
+  if (showLight) {
+    const sPt = projection(sunPt);
+    if (sPt) {
+      ctx.globalAlpha = illumOpacity;
+      const sg = ctx.createRadialGradient(sPt[0], sPt[1], 0, sPt[0], sPt[1], globeR * .9);
+      sg.addColorStop(0, 'rgba(255,240,180,0.06)');
+      sg.addColorStop(.4, 'rgba(255,220,120,0.02)');
+      sg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(cx, cy, globeR, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  ctx.restore(); // un-clip
 
   // Globe rim
-  ctx.beginPath();ctx.arc(cx,cy,globeR,0,Math.PI*2);
-  ctx.strokeStyle='rgba(80,140,210,0.12)';ctx.lineWidth=1;ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, globeR, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(80,140,210,0.12)'; ctx.lineWidth = 1; ctx.stroke();
 
   // Data markers
-  pointHitAreas=[];
-  const data=getData(),m=currentMonth;
-  const proj=data.map((d,i)=>{
-    const c=projection([d.lng,d.lat]);
-    const gd=d3.geoDistance([d.lng,d.lat],[-rotation[0],-rotation[1]]);
-    return{d,i,coord:c,vis:gd<Math.PI/2};
-  }).filter(p=>p.vis).sort((a,b)=>{
-    return d3.geoDistance([b.d.lng,b.d.lat],[-rotation[0],-rotation[1]])-
-           d3.geoDistance([a.d.lng,a.d.lat],[-rotation[0],-rotation[1]]);
+  pointHitAreas = [];
+  const data = getData(), m = currentMonth;
+  const proj = data.map((d, i) => {
+    const c = projection([d.lng, d.lat]);
+    const gd = d3.geoDistance([d.lng, d.lat], [-rotation[0], -rotation[1]]);
+    return { d, i, coord: c, vis: gd < Math.PI / 2 };
+  }).filter(p => p.vis).sort((a, b) =>
+    d3.geoDistance([b.d.lng, b.d.lat], [-rotation[0], -rotation[1]]) -
+    d3.geoDistance([a.d.lng, a.d.lat], [-rotation[0], -rotation[1]])
+  );
+
+  proj.forEach(({ d, i, coord }) => {
+    const val = interpolate(d.junAug, d.decFeb, m);
+    const [sx, sy] = coord;
+    const isSel = selectedIdx === i, r = isSel ? 8 : 5;
+
+    // Dim markers on the night side (only when illumination visible)
+    let dim = 1;
+    if (showLight) {
+      const distSun = d3.geoDistance([d.lng, d.lat], sunPt);
+      if (distSun > Math.PI / 2) dim = 1 - 0.5 * illumOpacity;
+    }
+
+    ctx.globalAlpha = dim;
+    const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 3.5);
+    g.addColorStop(0, valGlow(val)); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath(); ctx.arc(sx, sy, r * 3.5, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill();
+
+    ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fillStyle = valColor(val); ctx.fill();
+    if (isSel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+    else { ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = .5; ctx.stroke(); }
+    ctx.globalAlpha = 1;
+
+    pointHitAreas.push({ x: sx, y: sy, r: r + 6, idx: i });
   });
 
-  proj.forEach(({d,i,coord})=>{
-    const val=interpolate(d.junAug,d.decFeb,m);
-    const[sx,sy]=coord;
-    const isSel=selectedIdx===i,r=isSel?8:5;
-    const distSun=d3.geoDistance([d.lng,d.lat],sunPt);
-    const dim=distSun>Math.PI/2?0.5:1;
-
-    ctx.globalAlpha=dim;
-    const g=ctx.createRadialGradient(sx,sy,0,sx,sy,r*3.5);
-    g.addColorStop(0,valGlow(val));g.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.beginPath();ctx.arc(sx,sy,r*3.5,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
-
-    ctx.beginPath();ctx.arc(sx,sy,r,0,Math.PI*2);ctx.fillStyle=valColor(val);ctx.fill();
-    if(isSel){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke()}
-    else{ctx.strokeStyle='rgba(0,0,0,0.3)';ctx.lineWidth=.5;ctx.stroke()}
-    ctx.globalAlpha=1;
-
-    pointHitAreas.push({x:sx,y:sy,r:r+6,idx:i});
-  });
   updateSubtitle();
 }
 
-function startLoop(){
-  lastTime=performance.now();
-  (function frame(now){
-    const dt=now-lastTime;lastTime=now;
-    if(autoRotating&&!dragState){rotation[0]-=AUTO_SPEED*(dt/16.67);render()}
+// ── Animation loop ────────────────────────────────────────────────
+function startLoop() {
+  lastTime = performance.now();
+  (function frame(now) {
+    const dt = now - lastTime; lastTime = now;
+
+    if (mode === 'auto') {
+      // Auto-rotate and keep illumination visible
+      rotation[0] -= AUTO_SPEED * (dt / 16.67);
+      illumOpacity = Math.min(1, illumOpacity + dt * 0.003); // fade in
+      render();
+    }
+    else if (mode === 'returning') {
+      // Animate back to home position
+      const elapsed = now - returnStart;
+      const t = Math.min(1, elapsed / HOME_ANIM_DURATION);
+      // Ease-out cubic
+      const e = 1 - Math.pow(1 - t, 3);
+
+      // Interpolate rotation toward target
+      // For lambda (rotation[0]), we need to handle wrapping
+      let dLam = returnTarget[0] - returnFrom[0];
+      // Normalise to [-180, 180]
+      while (dLam > 180) dLam -= 360;
+      while (dLam < -180) dLam += 360;
+
+      rotation[0] = returnFrom[0] + dLam * e;
+      rotation[1] = returnFrom[1] + (returnTarget[1] - returnFrom[1]) * e;
+      rotation[2] = returnFrom[2] + (returnTarget[2] - returnFrom[2]) * e;
+
+      // Fade illumination back in during return
+      illumOpacity = e;
+
+      render();
+
+      if (t >= 1) {
+        // Arrived home — switch to auto
+        rotation = [...returnTarget];
+        mode = 'auto';
+        illumOpacity = 1;
+        updateSun();
+      }
+    }
+    else if (mode === 'interacting') {
+      // Fade out illumination quickly
+      if (illumOpacity > 0) {
+        illumOpacity = Math.max(0, illumOpacity - dt * 0.005);
+        render();
+      }
+    }
+
     requestAnimationFrame(frame);
   })(performance.now());
 }
-function pauseAuto(){autoRotating=false;if(autoTimer)clearTimeout(autoTimer)}
-function resumeAuto(){if(autoTimer)clearTimeout(autoTimer);
-  autoTimer=setTimeout(()=>{autoRotating=true},RESUME_DELAY)}
 
-function setupInteraction(){
-  const cv=document.getElementById('globe');
-  cv.addEventListener('pointerdown',e=>{
-    pauseAuto();
-    const rect=cv.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top;
-    for(let i=pointHitAreas.length-1;i>=0;i--){
-      const p=pointHitAreas[i];
-      if(Math.hypot(x-p.x,y-p.y)<p.r){selectedIdx=p.idx;openInfo(p.idx);render();resumeAuto();return}
-    }
-    selectedIdx=null;closeInfo();
-    dragState={x:e.clientX,y:e.clientY,rot:[...rotation]};
-    cv.setPointerCapture(e.pointerId);
-  });
-  cv.addEventListener('pointermove',e=>{
-    if(!dragState)return;
-    const dx=e.clientX-dragState.x,dy=e.clientY-dragState.y;
-    rotation[0]=dragState.rot[0]-dx*.3;
-    rotation[1]=Math.max(-80,Math.min(80,dragState.rot[1]+dy*.3));
-    render();
-  });
-  cv.addEventListener('pointerup',()=>{dragState=null;resumeAuto()});
-  cv.addEventListener('pointercancel',()=>{dragState=null;resumeAuto()});
-
-  const sl=document.getElementById('month-slider');
-  sl.addEventListener('input',()=>{
-    currentMonth=+sl.value;
-    document.getElementById('month-label').textContent=MONTHS[Math.max(0,Math.min(11,Math.round(currentMonth)-1))];
-    updateSun();
-    if(selectedIdx!==null)openInfo(selectedIdx);
-    render();
-  });
-  document.getElementById('month-label').textContent=MONTHS[6];
-  window.addEventListener('resize',()=>{setupCanvas();render()});
+// ── Mode transitions ──────────────────────────────────────────────
+function enterInteracting() {
+  mode = 'interacting';
+  if (autoTimer) clearTimeout(autoTimer);
 }
 
-function openInfo(idx){
-  const d=getData()[idx];if(!d)return;
-  const val=interpolate(d.junAug,d.decFeb,currentMonth),delta=Math.abs(d.junAug-d.decFeb);
-  document.getElementById('info-card').innerHTML=`
+function scheduleReturn() {
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => {
+    // Compute a home target: same phi/gamma as HOME, but lambda continues
+    // from current auto-rotate position (so it doesn't jump) —
+    // Actually, we want to return to the canonical home view.
+    // Set the target lambda so the globe takes the short path.
+    returnFrom = [...rotation];
+    returnTarget = [...HOME_ROT];
+    // Adjust target lambda to be close to current
+    let dl = HOME_ROT[0] - rotation[0];
+    while (dl > 180) dl -= 360;
+    while (dl < -180) dl += 360;
+    returnTarget[0] = rotation[0] + dl;
+
+    returnStart = performance.now();
+    mode = 'returning';
+    selectedIdx = null;
+    closeInfo();
+  }, RESUME_DELAY);
+}
+
+// ── Interaction ───────────────────────────────────────────────────
+function setupInteraction() {
+  const cv = document.getElementById('globe');
+
+  cv.addEventListener('pointerdown', e => {
+    enterInteracting();
+    const rect = cv.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
+
+    // Hit test markers
+    for (let i = pointHitAreas.length - 1; i >= 0; i--) {
+      const p = pointHitAreas[i];
+      if (Math.hypot(x - p.x, y - p.y) < p.r) {
+        selectedIdx = p.idx; openInfo(p.idx); render();
+        scheduleReturn();
+        return;
+      }
+    }
+    selectedIdx = null; closeInfo();
+    dragState = { x: e.clientX, y: e.clientY, rot: [...rotation] };
+    cv.setPointerCapture(e.pointerId);
+  });
+
+  cv.addEventListener('pointermove', e => {
+    if (!dragState) return;
+    const dx = e.clientX - dragState.x, dy = e.clientY - dragState.y;
+    rotation[0] = dragState.rot[0] - dx * .3;
+    rotation[1] = Math.max(-80, Math.min(80, dragState.rot[1] + dy * .3));
+    render();
+  });
+
+  cv.addEventListener('pointerup', () => { dragState = null; scheduleReturn(); });
+  cv.addEventListener('pointercancel', () => { dragState = null; scheduleReturn(); });
+
+  // Month slider
+  const sl = document.getElementById('month-slider');
+  sl.addEventListener('input', () => {
+    currentMonth = +sl.value;
+    document.getElementById('month-label').textContent =
+      MONTHS[Math.max(0, Math.min(11, Math.round(currentMonth) - 1))];
+    updateSun();
+    if (selectedIdx !== null) openInfo(selectedIdx);
+    render();
+  });
+  document.getElementById('month-label').textContent = MONTHS[6];
+
+  window.addEventListener('resize', () => { setupCanvas(); render(); });
+}
+
+// ── Info panel ────────────────────────────────────────────────────
+function openInfo(idx) {
+  const d = getData()[idx]; if (!d) return;
+  const val = interpolate(d.junAug, d.decFeb, currentMonth), delta = Math.abs(d.junAug - d.decFeb);
+  document.getElementById('info-card').innerHTML = `
     <div class="info-header">
       <span class="info-country">${d.country}</span>
       <span class="info-value" style="color:${valColor(val)}">${val.toFixed(0)}
         <span class="info-unit">${config.unit}</span></span>
     </div>
-    <div class="info-region">${d.region||''}</div>
+    <div class="info-region">${d.region || ''}</div>
     <div class="info-meta">
-      ${d.n?'<span>N\u2009=\u2009'+d.n.toLocaleString()+'</span>':''}
+      ${d.n ? '<span>N\u2009=\u2009' + d.n.toLocaleString() + '</span>' : ''}
       <span style="color:${valColor(val)}">${statusLabel(val)}</span>
     </div>
     <div class="info-seasonal">
@@ -378,14 +528,16 @@ function openInfo(idx){
       <div><div class="label">Δ\u2009SEASONAL</div><div class="val" style="color:var(--accent)">${delta.toFixed(0)}</div></div>
     </div>
     <div class="info-citation">
-      ${d.shortCite}${d.url?' · <a href="'+d.url+'" target="_blank" rel="noopener">View source ↗</a>':''}
-      ${d.fullCite?'<br><br><em>'+d.fullCite+'</em>':''}
+      ${d.shortCite}${d.url ? ' · <a href="' + d.url + '" target="_blank" rel="noopener">View source ↗</a>' : ''}
+      ${d.fullCite ? '<br><br><em>' + d.fullCite + '</em>' : ''}
     </div>`;
   document.getElementById('info-panel').classList.add('open');
-  document.getElementById('hint').style.display='none';
+  document.getElementById('hint').style.display = 'none';
 }
-function closeInfo(){document.getElementById('info-panel').classList.remove('open');
-  document.getElementById('hint').style.display=''}
+function closeInfo() {
+  document.getElementById('info-panel').classList.remove('open');
+  document.getElementById('hint').style.display = '';
+}
 
 init();
 </script>
