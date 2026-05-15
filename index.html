@@ -145,10 +145,12 @@ function solarDeclination(m) {
   return EARTH_TILT * Math.sin(2 * Math.PI * (m - 3) / 12);
 }
 
-// Sub-solar point: longitude = viewer-facing (tracks rotation),
-// latitude = declination. This keeps the sun fixed in screen space.
+// Sub-solar point: offset 70° east of centre so it appears to the LEFT
+// on screen. This makes the terminator band clearly visible across the
+// globe face. As the globe auto-rotates, countries pass through the
+// fixed day/night boundary. Latitude = solar declination (seasonal).
 function subSolarPoint() {
-  return [-rotation[0], solarDeclination(currentMonth)];
+  return [-rotation[0] + 70, solarDeclination(currentMonth)];
 }
 
 // ── Init ──────────────────────────────────────────────────────────
@@ -286,7 +288,7 @@ function render() {
   if (showLight) {
     ctx.globalAlpha = illumOpacity;
     ctx.beginPath(); path(nightCircle);
-    ctx.fillStyle = 'rgba(0,5,20,0.38)'; ctx.fill();
+    ctx.fillStyle = 'rgba(0,5,20,0.45)'; ctx.fill();
     ctx.globalAlpha = 1;
   }
 
@@ -299,7 +301,7 @@ function render() {
     ctx.globalAlpha = illumOpacity;
     ctx.beginPath(); path(nightCircle); ctx.clip();
     ctx.beginPath(); path(land);
-    ctx.fillStyle = 'rgba(0,5,20,0.42)'; ctx.fill();
+    ctx.fillStyle = 'rgba(0,5,20,0.50)'; ctx.fill();
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -312,7 +314,7 @@ function render() {
   if (showLight) {
     ctx.globalAlpha = illumOpacity * 0.6;
     ctx.beginPath(); path(nightCircle);
-    ctx.strokeStyle = 'rgba(240,200,80,0.30)'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.strokeStyle = 'rgba(240,200,80,0.45)'; ctx.lineWidth = 1.5; ctx.stroke();
     ctx.globalAlpha = 1;
   }
 
@@ -322,8 +324,8 @@ function render() {
     if (sPt) {
       ctx.globalAlpha = illumOpacity;
       const sg = ctx.createRadialGradient(sPt[0], sPt[1], 0, sPt[0], sPt[1], globeR * .9);
-      sg.addColorStop(0, 'rgba(255,240,180,0.06)');
-      sg.addColorStop(.4, 'rgba(255,220,120,0.02)');
+      sg.addColorStop(0, 'rgba(255,240,180,0.10)');
+      sg.addColorStop(.4, 'rgba(255,220,120,0.04)');
       sg.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(cx, cy, globeR, 0, Math.PI * 2); ctx.fill();
       ctx.globalAlpha = 1;
@@ -357,7 +359,7 @@ function render() {
     let dim = 1;
     if (showLight) {
       const distSun = d3.geoDistance([d.lng, d.lat], sunPt);
-      if (distSun > Math.PI / 2) dim = 1 - 0.5 * illumOpacity;
+      if (distSun > Math.PI / 2) dim = 1 - 0.6 * illumOpacity;
     }
 
     ctx.globalAlpha = dim;
@@ -440,13 +442,11 @@ function enterInteracting() {
 function scheduleReturn() {
   if (autoTimer) clearTimeout(autoTimer);
   autoTimer = setTimeout(() => {
-    // Compute a home target: same phi/gamma as HOME, but lambda continues
-    // from current auto-rotate position (so it doesn't jump) —
-    // Actually, we want to return to the canonical home view.
-    // Set the target lambda so the globe takes the short path.
+    // Don't auto-return while user is inspecting a selected location
+    if (selectedIdx !== null) return;
+
     returnFrom = [...rotation];
     returnTarget = [...HOME_ROT];
-    // Adjust target lambda to be close to current
     let dl = HOME_ROT[0] - rotation[0];
     while (dl > 180) dl -= 360;
     while (dl < -180) dl += 360;
@@ -467,12 +467,12 @@ function setupInteraction() {
     enterInteracting();
     const rect = cv.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
 
-    // Hit test markers
+    // Hit test markers — if we select one, stay paused until user clicks away
     for (let i = pointHitAreas.length - 1; i >= 0; i--) {
       const p = pointHitAreas[i];
       if (Math.hypot(x - p.x, y - p.y) < p.r) {
         selectedIdx = p.idx; openInfo(p.idx); render();
-        scheduleReturn();
+        // Do NOT schedule return — keep globe still while a location is selected
         return;
       }
     }
