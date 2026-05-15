@@ -145,12 +145,12 @@ function solarDeclination(m) {
   return EARTH_TILT * Math.sin(2 * Math.PI * (m - 3) / 12);
 }
 
-// Sub-solar point: offset 70° east of centre so it appears to the LEFT
-// on screen. This makes the terminator band clearly visible across the
-// globe face. As the globe auto-rotates, countries pass through the
-// fixed day/night boundary. Latitude = solar declination (seasonal).
+// Sub-solar point: offset 70° WEST of centre so it appears to the LEFT
+// on screen (west = left in orthographic view from outside the globe).
+// As the globe auto-rotates, countries pass through the fixed day/night
+// boundary. Latitude = solar declination (seasonal).
 function subSolarPoint() {
-  return [-rotation[0] + 70, solarDeclination(currentMonth)];
+  return [-rotation[0] - 70, solarDeclination(currentMonth)];
 }
 
 // ── Init ──────────────────────────────────────────────────────────
